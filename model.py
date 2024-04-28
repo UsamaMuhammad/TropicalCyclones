@@ -6,218 +6,18 @@ import pandas as pd
 from torch.nn import functional as F
 from sklearn.preprocessing import RobustScaler
 import matplotlib.pyplot as plt
-import matplotlib.pyplot as plt
 from matplotlib import rcParams
+import numpy as np
+from utils import replace_outliers_with_nearest, create_sequences, plot_sequence_and_error
+import plotly.graph_objects as go
+import plotly.express as px
+
+from plotly.subplots import make_subplots
+
 
 # Set the default font to Times New Roman
 rcParams['font.family'] = 'serif'
 rcParams['font.serif'] = ['Times New Roman']
-
-def plot_sequence_and_error(original, reconstructed, error, threshold, title="Sequence and Reconstruction Error"):
-    num_samples = min(original.shape[0], 5)
-    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 2 * num_samples))
-    feature_labels = ["Temperature", "Salinity", "DO", "Turbidity"]
-    
-    for i in range(num_samples):
-        # Plot Original
-        axes[i, 0].plot(original[i].detach().cpu().numpy(), label=feature_labels)
-        axes[i, 0].set_title("Original")
-        axes[i, 0].set_xlim([0, len(original[i])])  # Set x-axis limits
-        axes[i, 0].set_ylim([original[i].detach().cpu().numpy().min(), original[i].detach().cpu().numpy().max()])
-        if i == 0:
-            axes[i, 0].legend()
-
-        # Plot Reconstructed
-        axes[i, 1].plot(reconstructed[i].detach().cpu().numpy(), label=feature_labels)
-        axes[i, 1].set_title("Reconstructed")
-        axes[i, 1].set_xlim([0, len(original[i])])  # Set x-axis limits
-        axes[i, 1].set_ylim([original[i].detach().cpu().numpy().min(), original[i].detach().cpu().numpy().max()])
-
-        # Plot Reconstruction Error
-        axes[i, 2].plot(error[i].detach().cpu().numpy(), label="Reconstruction Error", color='red')
-        axes[i, 2].axhline(threshold, color='orange', linestyle='--', label="Threshold")
-        axes[i, 2].set_title("Reconstruction Error")
-        axes[i, 2].set_xlim([0, len(original[i])])  # Set x-axis limits
-
-    plt.suptitle(title)
-
-    # Add common legend at the bottom of the plot
-    lines, labels = axes[0, 2].get_legend_handles_labels()
-    fig.legend(lines, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3)
-
-    plt.tight_layout()
-
-    # Save the plot with high quality
-    plt.savefig('sequence_and_error_plot.png', dpi=600, bbox_inches='tight')
-    
-    plt.show()
-
-# Example usage:
-# Call the function with your data
-# plot_sequence_and_error(original_data, reconstructed_data, error_data, threshold_value)
-
-
-
-def plot_sequence_and_error(original, reconstructed, error, threshold, title="Sequence and Reconstruction Error"):
-    num_samples = min(original.shape[0], 5)
-    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 2 * num_samples))
-    feature_labels = ["Temperature", "Salinity", "DO", "Turbidity"]
-    for i in range(num_samples):
-        # Plot Original
-        axes[i, 0].plot(original[i].detach().cpu().numpy(), label=feature_labels)
-        axes[i, 0].set_title("Original")
-        axes[i, 0].set_xlim([0, len(original[i])])  # Set x-axis limits
-        axes[i, 0].set_ylim([original[i].detach().cpu().numpy().min(), original[i].detach().cpu().numpy().max()])  # Set y-axis limits
-        #axes[i, 0].legend()
-        if i==0:
-            axes[i, 0].legend()
-            
-
-        # Plot Reconstructed
-        axes[i, 1].plot(reconstructed[i].detach().cpu().numpy(), label=feature_labels)
-        axes[i, 1].set_title("Reconstructed")
-        axes[i, 1].set_xlim([0, len(original[i])])  # Set x-axis limits
-        axes[i, 1].set_ylim([original[i].detach().cpu().numpy().min(), original[i].detach().cpu().numpy().max()])  # Set y-axis limits
-        #axes[i, 1].legend()
-
-        # Plot Reconstruction Error
-        axes[i, 2].plot(error[i].detach().cpu().numpy(), label="Reconstruction Error", color='red')
-        axes[i, 2].axhline(threshold, color='orange', linestyle='--', label="Threshold")
-        axes[i, 2].set_title("Reconstruction Error")
-        axes[i, 2].set_xlim([0, len(original[i])])  # Set x-axis limits
-        #axes[i, 2].legend()
-
-    plt.suptitle(title)
-    plt.tight_layout()
-
-    # Add common legend at the bottom of the plot
-    lines, labels = axes[0, 2].get_legend_handles_labels()
-    fig.legend(lines, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3)
-    
-    plt.show()
-
-
-
-# Function to plot sequences and reconstruction error
-def plot_sequence_and_error(original, reconstructed, error, threshold, title="Sequence and Reconstruction Error"):
-    num_samples = min(original.shape[0], 5)
-    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 2 * num_samples))
-
-    for i in range(num_samples):
-        # Plot Original
-        axes[i, 0].plot(original[i].detach().cpu().numpy(), label="Original")
-        axes[i, 0].set_title("Original")
-        axes[i, 0].set_xlim([0, len(original[i])])  # Set x-axis limits
-        axes[i, 0].set_ylim([original[i].detach().cpu().numpy().min(), original[i].detach().cpu().numpy().max()])  # Set y-axis limits
-
-        # Plot Reconstructed
-        axes[i, 1].plot(reconstructed[i].detach().cpu().numpy(), label="Reconstructed")
-        axes[i, 1].set_title("Reconstructed")
-        axes[i, 1].set_xlim([0, len(original[i])])  # Set x-axis limits
-        axes[i, 1].set_ylim([original[i].detach().cpu().numpy().min(), original[i].detach().cpu().numpy().max()])  # Set y-axis limits
-
-        # Plot Reconstruction Error
-        axes[i, 2].plot(error[i].detach().cpu().numpy(), label="Reconstruction Error", color='red')
-        axes[i, 2].axhline(threshold, color='orange', linestyle='--', label="Threshold")
-        axes[i, 2].set_title("Reconstruction Error")
-        axes[i, 2].set_xlim([0, len(original[i])])  # Set x-axis limits
-        
-    plt.suptitle(title)
-    plt.tight_layout()
-
-    # Add common legend at the bottom of the plot
-    lines, labels = axes[0, 2].get_legend_handles_labels()
-    fig.legend(lines, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3)
-    
-    plt.show()
-'''
-    plt.suptitle(title)
-    plt.tight_layout()
-    plt.show()
-'''
-# Function to create sequences from the data
-def create_sequences(data, sequence_length):
-    sequences = []
-    for i in range(len(data) - sequence_length + 1):
-        sequence = data[i: i + sequence_length].numpy()
-        sequences.append(sequence)
-    return np.array(sequences)
-
-# Assuming you have initialized 'device' earlier
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# Load your sensor data and labels
-data = pd.read_csv("data_df1.csv", parse_dates=["datetime"])
-
-# Convert datetime column to datetime format
-data['datetime'] = pd.to_datetime(data['datetime'])
-
-# Extract datetime column
-datetime_column = data["datetime"]
-# Drop datetime column for processing
-data = data.drop(columns=["datetime"])
-
-# Function to replace outliers with the mean of 5 before and 5 after values
-def replace_outliers_with_nearest(df, threshold=15, window_size=5):
-    df_copy = df.copy()
-
-    for col in df_copy.columns:
-        col_data = df_copy[col].values
-        outliers = np.abs(col_data - col_data.mean()) > threshold * col_data.std()
-
-        # Find indices of outliers
-        outlier_indices = np.where(outliers)[0]
-        threshold = 10
-        window_size = 5
-        
-
-        while len(outlier_indices) > 0:
-            a = len(outlier_indices)
-            for index in outlier_indices:
-                start_idx = max(0, index - window_size)
-                end_idx = min(len(col_data), index + window_size + 1)
-
-                # Replace outlier with the mean of 5 before and 5 after values
-                df_copy.at[index, col] = np.mean(col_data[start_idx:end_idx])
-
-            # Check for outliers again
-            col_data = df_copy[col].values
-            outliers = np.abs(col_data - col_data.mean()) > threshold * col_data.std()
-            outlier_indices = np.where(outliers)[0]
-            #print(len(outlier_indices))
-            if a <= len(outlier_indices):
-                window_size +=1
-                
-
-    return df_copy
-
-# Process the data and remove outliers
-data = replace_outliers_with_nearest(data)
-#data.describe()
-
-# Add datetime column back
-data["datetime"] = datetime_column
-#data.to_csv("noOutlierData.csv", header = True)
-data = data.set_index('datetime')
-# Resample the data at every two hours using mean
-resampled_data = data.resample('1H').mean()
-
-# Normalize the resampled data
-scaler = RobustScaler()  # RobustScaler is less sensitive to outliers
-resampled_data_normalized = scaler.fit_transform(resampled_data)
-
-# Convert data to PyTorch tensor
-data_tensor = torch.tensor(resampled_data_normalized, dtype=torch.float32)
-
-# Create sequences
-sequence_length = 10  # You can adjust this based on your needs
-sequences = create_sequences(data_tensor, sequence_length)
-
-# Convert sequences to PyTorch tensor
-sequences = torch.tensor(sequences, dtype=torch.float32)
-
-# Assuming 'device' is defined earlier
-sequences = sequences.to(device)
 
 # Define a single shared encoder for all estuaries
 class Encoder(nn.Module):
@@ -257,12 +57,55 @@ class Autoencoder(nn.Module):
 
 
 
+# Assuming you have initialized 'device' earlier
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Load your sensor data and labels
+data = pd.read_csv("data_df1.csv", parse_dates=["datetime"])
+
+# Convert datetime column to datetime format
+data['datetime'] = pd.to_datetime(data['datetime'])
+
+# Extract datetime column
+datetime_column = data["datetime"]
+# Drop datetime column for processing
+data = data.drop(columns=["datetime"])
+
+# Process the data and remove outliers
+data = replace_outliers_with_nearest(data)
+#data.describe()
+
+# Add datetime column back
+data["datetime"] = datetime_column
+#data.to_csv("noOutlierData.csv", header = True)
+data = data.set_index('datetime')
+# Resample the data at every two hours using mean
+resampled_data = data.resample('1H').mean()
+
+# Normalize the resampled data
+scaler = RobustScaler()  # RobustScaler is less sensitive to outliers
+resampled_data_normalized = scaler.fit_transform(resampled_data)
+
+# Convert data to PyTorch tensor
+data_tensor = torch.tensor(resampled_data_normalized, dtype=torch.float32)
+
+# Create sequences
+sequence_length = 10  # You can adjust this based on your needs
+sequences = create_sequences(data_tensor, sequence_length)
+
+# Convert sequences to PyTorch tensor
+sequences = torch.tensor(sequences, dtype=torch.float32)
+
+# Assuming 'device' is defined earlier
+sequences = sequences.to(device)
+
+
 # Initialize and train the autoencoder for each estuary
 input_size = 4  # You should set this based on your actual input size
 hidden_size = 64  # You can adjust this based on your needs
 num_estuaries = 19  # Number of estuaries
 initial_lr = 0.01  # You can adjust this based on your needs
-num_epochs = 50  # You can adjust this based on your needs
+num_epochs = 2  # You can adjust this based on your needs
 batch_size = 512
 
 autoencoder = Autoencoder(input_size, hidden_size, num_estuaries).to(device)
@@ -355,55 +198,8 @@ plt.ylabel("Learning Rate")
 plt.show()
 
 ###
-import plotly.graph_objects as go
-import plotly.express as px
-
-# Assuming 'all_losses' and 'learning_rates' are defined in your environment
-
-# Plot the training losses for each estuary
-fig_losses = go.Figure()
-
-for estuary_idx, estuary_losses in all_losses.items():
-    fig_losses.add_trace(go.Scatter(
-        x=list(range(1, len(estuary_losses) + 1)),
-        y=estuary_losses,
-        mode='lines',
-        name=str(estuary_idx),
-        line=dict(width=2, backoff=0.7)
-    ))
-
-fig_losses.update_layout(
-    title="Training Loss Over Epochs for Each Estuary",
-    xaxis_title="Epochs",
-    yaxis_title="Average Loss",
-    legend=dict(orientation="h", x=0.5, y=-0.15),
-    font=dict(family="Times New Roman"),
-)
-
-# Save the interactive plot
-fig_losses.write_html("training_losses_plot.html", full_html=False)
-
-# Plotting the learning rates
-fig_learning_rates = px.line(
-    x=list(range(1, len(learning_rates) + 1)),
-    y=learning_rates,
-    markers=True,
-    labels={"x": "Epochs", "y": "Learning Rate"},
-    title="Learning Rate Adjustment Over Epochs",
-)
-
-fig_learning_rates.update_layout(
-    font=dict(family="Times New Roman"),
-)
-
-# Save the interactive plot
-fig_learning_rates.write_html("learning_rates_plot.html", full_html=False)
 
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import matplotlib.pyplot as plt
-import numpy as np
 
 # Assuming 'all_losses' and 'learning_rates' are defined in your environment
 
@@ -427,30 +223,6 @@ fig_losses.update_layout(
     font=dict(family="Times New Roman"),
 )
 
-# Add legends manually at the bottom
-fig_losses.add_trace(go.Scatter(), row=len(all_losses), col=1, name=', '.join(all_losses.keys()))
-
-# Create a subplot for the learning rates
-fig_learning_rates = go.Figure()
-
-fig_learning_rates.add_trace(go.Scatter(
-    x=np.arange(1, len(learning_rates) + 1),
-    y=learning_rates,
-    mode='markers+lines',
-    marker=dict(symbol='circle', size=8),
-    line=dict(width=2, backoff=0.7)
-))
-
-fig_learning_rates.update_layout(
-    title="Learning Rate Adjustment Over Epochs",
-    xaxis_title="Epochs",
-    yaxis_title="Learning Rate",
-    font=dict(family="Times New Roman"),
-)
-
-# Save the interactive plots as JPEG
-fig_losses.write_image("training_losses_plot.jpg", scale=6)  # 600 DPI
-fig_learning_rates.write_image("learning_rates_plot.jpg", scale=6)  # 600 DPI
 
 
 
