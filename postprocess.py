@@ -1,59 +1,244 @@
-import os
+import torch
 import pandas as pd
+import torch.nn.functional as F
+from model import prepare_combined_data, Autoencoder
+import pickle
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-import joblib
-import seaborn as sns
-sns.set(color_codes=True)
 import matplotlib.pyplot as plt
-#matplotlib inline
-
-import h5py
-import tensorflow as tf
-tf.random.set_seed(10)
-tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-
-from matplotlib import rcParams
-
-
-from keras.layers import Input, Dense, LSTM, TimeDistributed, RepeatVector
-from keras.models import Model
-from keras import regularizers
-
-from scipy.stats import ttest_ind
-from scipy.signal import savgol_filter
-from scipy.ndimage import gaussian_filter1d
-from scipy.signal import find_peaks
-###Functions
-
 from scipy.integrate import simps
+from scipy.stats import ttest_ind
+from scipy.ndimage import gaussian_filter1d
+import os
+from matplotlib.dates import DateFormatter, MonthLocator, DayLocator, AutoDateLocator
 
-def calculate_disturbance_magnitude(sub_reconstructed_data):
+
+
+def prepare_combined_data(filtered_data, sequence_length, iqr_threshold=3, smoothing="rolling", window=3):
     """
-    Calculate the disturbance magnitude based on the area under the error curve.
+    Combines sequences from all hurricanes for training, with outlier handling and smoothing.
 
     Parameters:
-    - sub_reconstructed_data: DataFrame with 'datetime', 'Estuary', 'errors' columns.
+        filtered_data (list): List of dictionaries containing filtered data for each hurricane and estuary.
+        sequence_length (int): Length of each sequence for LSTM input.
+        iqr_threshold (float): Threshold for outlier handling (default is 1.5 IQR).
+        smoothing (str): Smoothing method ('rolling', 'exponential', 'gaussian').
+        window (int): Window size for smoothing (default is 3).
 
     Returns:
-    - disturbance_magnitude: Magnitude of disturbances.
+        combined_sequences (torch.Tensor): Combined sequences for all events.
+        scalers (list): List of scalers for each entry.
     """
+    combined_sequences = []
+    scalers = []
 
-    # Assuming 'sub_reconstructed_data' is your DataFrame
-    sub_reconstructed_data = sub_reconstructed_data.reset_index(drop=True)  # Resetting the index
+    for entry in filtered_data:
+        df = entry["Data"].copy()
+
+        # Handle outliers using the IQR method
+        #q1 = df.quantile(0.25)
+        #q3 = df.quantile(0.75)
+        #iqr = q3 - q1
+        #lower_bound = q1 - iqr_threshold * iqr
+        #upper_bound = q3 + iqr_threshold * iqr
+        #df = df.clip(lower=lower_bound, upper=upper_bound, axis=1)
+
+        # Apply smoothing
+        if smoothing == "rolling":
+            df = df.rolling(window=window, min_periods=1, center=True).mean()
+        elif smoothing == "exponential":
+            df = df.ewm(span=window, adjust=False).mean()
+        elif smoothing == "gaussian":
+            from scipy.ndimage import gaussian_filter1d
+            df = pd.DataFrame(
+                gaussian_filter1d(df.values, sigma=window),
+                index=df.index,
+                columns=df.columns,
+            )
+        elif smoothing is not None:
+            raise ValueError(f"Unknown smoothing type: {smoothing}")
+
+        # Scale the data using RobustScaler
+        scaler = RobustScaler()
+        scaled_data = scaler.fit_transform(df.values)
+        scalers.append(scaler)
+
+        # Convert to PyTorch tensor and create sequences
+        tensor_data = torch.tensor(scaled_data, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+        sequences = [
+            tensor_data[:, i:i + sequence_length, :]
+            for i in range(0, tensor_data.size(1) - sequence_length + 1, sequence_length)
+        ]
+        combined_sequences.extend(sequences)
+
+    # Combine sequences into a single tensor
+    combined_sequences = torch.cat(combined_sequences, dim=0)
+    return combined_sequences, scalers
+
+
+
+
+# Load the data dictionary
+def load_filtered_data(file_path):
+    with open(file_path, "rb") as file:
+        return pickle.load(file)
+
+
+#################
+#################
+#### Data plots
+#################
+#################
+
+def plot_data_with_customization(sub_data, output_folder, columnslabel):
+    """
+    Plots raw values of Temperature, Salinity, DO, and Turbidity in 4 separate subplots with custom colors and legends.
+
+    Parameters:
+    - sub_data: DataFrame containing 'Temperature', 'Salinity', 'DO', and 'Turbidity' columns.
+    - output_folder: Directory where the plots will be saved.
+    - columnslabel: String used in the filename for saving the plot.
+    """
+    features = ['Temperature', 'Salinity', 'DO', 'Turbidity']
+    # Features to plot and their corresponding colors
     
-    # Now you can sort the DataFrame by 'datetime'
-    sub_reconstructed_data = sub_reconstructed_data.sort_values(by='datetime')
+    #normalized_data = sub_data.copy()
+    for feature in features:
+        sub_data[feature] = (
+            sub_data[feature] - sub_data[feature].min()
+        ) / (sub_data[feature].max() - sub_data[feature].min())
 
-    # Extract errors and corresponding timestamps
-    errors = sub_reconstructed_data['errors'].values
-    timestamps = sub_reconstructed_data.index.values
+    features = {
+        'Temperature': 'blue',
+        'Salinity': 'orange',
+        'DO': 'green',
+        'Turbidity': 'red',
+    }
 
-    # Calculate the area under the error curve using Simpson's rule
-    disturbance_magnitude = simps(errors, timestamps)
+    # Create subplots
+    fig, axes = plt.subplots(nrows=4, ncols=1, figsize=(12, 8), sharex=True)
+    for i, (feature, color) in enumerate(features.items()):
+        ax = axes[i]
+        ax.plot(sub_data['datetime'], sub_data[feature], label=feature, color=color, linestyle='-')
+        ax.set_ylabel(feature, fontsize=10)
+        ax.legend(loc='upper right', fontsize=10)
+        ax.grid(True)
+        if i == 3:  # Apply x-axis labels to the last subplot only
+            ax.set_xlabel("Timeline", fontsize=12)
+        else:
+            ax.set_xticks([])  # Remove xticks for other subplots
 
-    return disturbance_magnitude
+    # Highlight the cyclone period in all subplots
+    cyclone_subset = sub_data[sub_data['cyclone_Status'] == 'cyclone']
+    if not cyclone_subset.empty:
+        cyclone_start = cyclone_subset['datetime'].min()
+        cyclone_end = cyclone_subset['datetime'].max()
+        for ax in axes:
+            ax.axvspan(cyclone_start, cyclone_end, facecolor='red', alpha=0.3, label='Cyclone Period')
 
+    # Customize x-axis ticks for the last subplot
+    ax = axes[3]
+    total_days = (sub_data['datetime'].max() - sub_data['datetime'].min()).days
+    if total_days > 365:  # More than 1 year
+        ax.xaxis.set_major_locator(MonthLocator(interval=3))  # One tick every 3 months
+        ax.xaxis.set_major_formatter(DateFormatter("%b %Y"))  # Format as "Jan 2021"
+    elif total_days > 90:  # More than 3 months
+        ax.xaxis.set_major_locator(MonthLocator(interval=1))  # One tick every month
+        ax.xaxis.set_major_formatter(DateFormatter("%b %Y"))  # Format as "Jan 2021"
+    elif total_days > 30:  # More than 1 month
+        ax.xaxis.set_major_locator(DayLocator(interval=15))  # One tick every 15 days
+        ax.xaxis.set_major_formatter(DateFormatter("%d %b %Y"))  # Format as "01 Jan 2021"
+    else:  # Less than 1 month
+        ax.xaxis.set_major_locator(DayLocator(interval=7))  # One tick every 7 days
+        ax.xaxis.set_major_formatter(DateFormatter("%d %b %Y"))  # Format as "01 Jan")
+
+    # Ensure the output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Save the plot
+    filename = os.path.join(output_folder, f"customized_plot_{columnslabel}.png")
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+    print(f"Plot saved to {filename}")
+
+
+def plot_cyclone_recovery(tot, sub_reconstructedData, global_peak_index, recoveryIndex, columnslabel, output_folder):
+    """
+    Create and save a plot for cyclone disturbance and recovery phases.
+
+    Parameters:
+    - tot: DataFrame containing the 'errors' for the full dataset
+    - sub_reconstructedData: DataFrame containing 'errors' and 'serr' (smoothed errors) for the subset
+    - global_peak_index: Integer index for the global peak in the subset
+    - recoveryIndex: Integer index for the recovery phase in the subset
+    - columnslabel: String used in the filename for saving the plot
+    - output_folder: Directory where the plot will be saved.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Create the figure
+    plt.figure(figsize=(12, 6))
+
+    # Plot the reconstruction error
+    plt.plot(tot.index, tot['errors'], label='Reconstruction Error', linestyle='-', marker='o', color='blue')
+
+    # Plot the smoothed error
+    plt.plot(sub_reconstructedData.index, sub_reconstructedData['serr'], label='Smoothed Error', linestyle='-', marker='x', color='orange')
+
+    # Highlight disturbance phase
+    plt.axvspan(
+        sub_reconstructedData.index[0],
+        sub_reconstructedData.index[global_peak_index],
+        color='red', alpha=0.3, label='Disturbance Phase'
+    )
+
+    # Highlight recovery phase
+    plt.axvspan(
+        sub_reconstructedData.index[global_peak_index],
+        sub_reconstructedData.index[recoveryIndex],
+        color='green', alpha=0.3, label='Recovery Phase'
+    )
+
+    # Add title and labels
+    plt.xlabel("Timeline")
+    plt.ylabel("Reconstruction Error")
+
+    # Format x-axis ticks to show one tick per month
+    ax = plt.gca()
+    total_days = (tot.index[-1] - tot.index[0]).days
+    
+    if total_days > 365:  # More than 1 year
+        ax.xaxis.set_major_locator(MonthLocator(interval=3))  # One tick every 3 months
+        ax.xaxis.set_major_formatter(DateFormatter("%b %Y"))  # Format as "Jan 2021"
+    elif total_days > 90:  # More than 3 months
+        ax.xaxis.set_major_locator(MonthLocator(interval=1))  # One tick every month
+        ax.xaxis.set_major_formatter(DateFormatter("%b %Y"))  # Format as "Jan 2021"
+    elif total_days > 30:  # More than 1 month
+        ax.xaxis.set_major_locator(DayLocator(interval=15))  # One tick every 15 days
+        ax.xaxis.set_major_formatter(DateFormatter("%d %b %Y"))  # Format as "01 Jan 2021"
+    else:  # Less than 1 month
+        ax.xaxis.set_major_locator(DayLocator(interval=7))  # One tick every 7 days
+        ax.xaxis.set_major_formatter(DateFormatter("%d %b %Y"))  # Format as "01 Jan"
+    
+    # Force matplotlib to display all ticks
+    ax.xaxis.set_minor_locator(AutoDateLocator())  # Optional: add minor ticks
+
+    # Rotate x-axis labels for better readability
+    plt.xticks(rotation=0)
+    # Format x-axis ticks to show one tick per month
+    # Show grid
+    plt.grid(True)
+
+    # Add legend
+    plt.legend(loc='upper right')
+
+    # Save the plot
+    filename = os.path.join(output_folder, f"cyclone_disturbance_recovery_{columnslabel}.png")
+    plt.savefig(filename, bbox_inches='tight')
+    plt.close()
+
+    print(f"Plot saved to {filename}")
 
 
 
@@ -96,13 +281,6 @@ def merge_series(arr, threshold):
             break  # Break the loop if no merging occurred in this iteration
 
     return arr
-
-
-
-
-
-
-# Assuming df is your original DataFrame
 
 def normalize_and_add_count(df, label_column, min_series_length=96, max_gap_between_series=3*240):
     df['hurricaneCount'] = 0
@@ -151,96 +329,8 @@ def normalize_and_add_count(df, label_column, min_series_length=96, max_gap_betw
     # Replace the values in the column with their positions
     df['hurricaneCount'] = df['hurricaneCount'].map(value_to_position)
     
-    
-    
-    # Now, df[column_name] contains the positions of the unique values
-
-
-    #df = df[~df['hurricaneCount'].isin(short_series)]
-    #input_array = np.array(df['hurricaneCount'])
-
-    
-    #df['newLabel'] = result_array
 
     return df[['hurricaneCount']]  # Return only the newLabel column
-
-
-
-def plot_sub_data(sub_data, cid):
-    # Features to plot
-    features = ['Temp', 'Sal', 'DO_mgl', 'Turb']
-
-    # Time periods
-    time_periods = ['pre-cyclone', 'cyclone', 'post-cyclone']
-
-    # Create subplots
-    fig, axs = plt.subplots(len(features), 1, figsize=(10, 8), sharex=True)
-
-    # Plot each feature in a subplot
-    for i, feature in enumerate(features):
-        ax = axs[i]
-
-        # Plot lines for each time period
-        for period in time_periods:
-            subset = sub_data[sub_data['cyclone_Status'] == period]
-            ax.plot(subset['datetime'], subset[feature], label=period)
-
-        # Shade the entire background during the hurricane period
-        hurricane_subset = sub_data[sub_data['cyclone_Status'] == 'cyclone']
-        hurricane_start = hurricane_subset['datetime'].min()
-        hurricane_end = hurricane_subset['datetime'].max()
-        ax.axvspan(hurricane_start, hurricane_end, facecolor='red', alpha=0.3, label='Disturbance Window')
-
-        # Add a line for the cumulative mean
-        #cum_mean = sub_data.groupby('cyclone_Status')[feature].expanding().mean().reset_index(level=0, drop=True)
-        # Plot last 10 values mean
-        window_size = 100
-        cum_mean_last_10 = sub_data[feature].rolling(window=window_size, min_periods=1).mean()
-        ax.plot(sub_data['datetime'], cum_mean_last_10, label= 'Moving Average', linestyle='--', color='red')
-
-        #cum_mean = sub_data[feature].expanding().mean()
-
-        #ax.plot(sub_data['datetime'], cum_mean, label='Cumulative Mean', linestyle='--', color='black')
-
-        ax.set_ylabel(feature)
-        ax.legend(loc='upper right')
-
-    plt.tight_layout()
-
-    # Save the plot at 300 DPI
-    plt.savefig(f'plot{cid}.png', dpi=300)
-
-    plt.show()
-
-
-def analyze_sub_data(sub_data):
-    # Group by 'Hurricane_Status' and calculate the mean for each feature
-    means_by_status = sub_data.groupby('cyclone_Status').mean()
-
-    # Create a table to store results
-    results_table = pd.DataFrame(index=['pre-cyclone', 'cyclone', 'post-cyclone'])
-
-    # Loop through each feature and perform t-test
-    for feature in ['Temp', 'Sal', 'DO_mgl', 'Turb']:
-        pre_hurricane_mean = means_by_status.loc['pre-cyclone', feature]
-        hurricane_mean = means_by_status.loc['cyclone', feature]
-        post_hurricane_mean = means_by_status.loc['post-cyclone', feature]
-
-        # Perform t-tests
-        t_stat_hurricane, p_value_hurricane = ttest_ind(sub_data[sub_data['cyclone_Status'] == 'pre-cyclone'][feature],
-                                                         sub_data[sub_data['cyclone_Status'] == 'cyclone'][feature])
-
-        t_stat_post, p_value_post = ttest_ind(sub_data[sub_data['cyclone_Status'] == 'cyclone'][feature],
-                                               sub_data[sub_data['cyclone_Status'] == 'post-cyclone'][feature])
-
-        # Store results in the table
-        results_table[feature + '_pre_cyclone'] = pre_hurricane_mean
-        results_table[feature + '_hcyclone'] = hurricane_mean
-        results_table[feature + '_cyclone'] = post_hurricane_mean
-        results_table['p_value_cyclone_' + feature] = p_value_hurricane
-        results_table['p_value_post_cyclone_' + feature] = p_value_post
-
-    return results_table
 
 def is_strictly_concave(vector):
     """
@@ -288,274 +378,172 @@ def find_peaks_in_concave_segments(data, sigma=2):
 
 
 
-labelData = pd.read_csv('reconstruction_errors.csv')
-labelData['datetime'] = pd.to_datetime(labelData['datetime'], format='%Y-%m-%d %H:%M:%S')
-reconstruction_errors = labelData.copy()
-dateTime = labelData['datetime'] 
-labelData = labelData.drop(columns=["datetime"])
+def calculate_disturbance_magnitude(sub_reconstructed_data):
+    """
+    Calculate the disturbance magnitude based on the area under the error curve.
 
+    Parameters:
+    - sub_reconstructed_data: DataFrame with 'datetime', 'Estuary', 'errors' columns.
 
-# Use the trained model to obtain reconstruction errors for all estuaries
-for col in labelData.columns:
-    # Extract data for the current estuary
-    normalized_errors = labelData[col]
+    Returns:
+    - disturbance_magnitude: Magnitude of disturbances.
+    """
+
+    # Assuming 'sub_reconstructed_data' is your DataFrame
+    sub_reconstructed_data = sub_reconstructed_data.reset_index(drop=True)  # Resetting the index
     
-    # Vectorized operation to calculate anomalies
-    anomalies = (normalized_errors > 3 * normalized_errors.std()).astype(int)
+    # Now you can sort the DataFrame by 'datetime'
+    sub_reconstructed_data = sub_reconstructed_data.sort_values(by='datetime')
+
+    # Extract errors and corresponding timestamps
+    errors = sub_reconstructed_data['errors'].values
+    timestamps = sub_reconstructed_data.index.values
+
+    # Calculate the area under the error curve using Simpson's rule
+    disturbance_magnitude = simps(errors, timestamps)
+
+    return disturbance_magnitude
+
+
+def recond_Data(df, sequence_length,AE, threshold=0.1 ):
     
-    labelData[col] = anomalies
+
+    
+    sequences = []
+    
 
 
+    #df = entry["Data"].copy()
+    
+    # Handle outliers using the IQR method
+    #q1 = df.quantile(0.25)
+    #q3 = df.quantile(0.75)
+    #iqr = q3 - q1
+    #lower_bound = q1 - iqr_threshold * iqr
+    #upper_bound = q3 + iqr_threshold * iqr
+    #df = df.clip(lower=lower_bound, upper=upper_bound, axis=1)
+    
+    
+    
+    # Scale the data
+    scaler = RobustScaler()
+    scaled_data = scaler.fit_transform(df.values)
+    scalers.append(scaler)
+    
+    # Convert to PyTorch tensor
+    #tensor_data = torch.tensor(scaled_data, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
 
-
-
-
-
-# Define the date range
-start_date = '2007-01-01'
-end_date = '2023-09-30'
-
-filename = 'noOutlierData.csv'
-
-
-file_path = os.path.join(folder_path, filename)
+    # Create sequences with a shift of 1
+    for i in range(len(df) - sequence_length + 1):
+        sequences.append(df.iloc[i:i + sequence_length].values)
+        # Append metadata for this sequence
         
-       
+
+    model.eval()
+
+    # Iterate through combined sequences and metadata
+    labels = []
+    errors = []
+    with torch.no_grad():
+        sequences = torch.tensor(sequences, dtype=torch.float32).to(device)
+
+        # Pass through autoencoder
+        reconstructed = model(sequences)
+
+        # Compute per-sequence reconstruction errors
+        reconstruction_error = torch.mean((reconstructed - sequences) ** 2, dim=(1, 2)).cpu().numpy()
+        reconstruction_error = (reconstruction_error-reconstruction_error.min())/(reconstruction_error.max()-reconstruction_error.min())
+
+        # Perform element-wise comparison to generate labels
+        labels = (reconstruction_error > threshold).astype(int)  # 1 for error > threshold, 0 otherwise
         
-# Read the CSV file
-mainData = pd.read_csv(file_path)
-filename = 'noOutlierData'
-#mainData = mainData[['DateTimeStamp', 'Temp', 'Sal','DO_mgl', 'Turb']]
-mainData['datetime'] = pd.to_datetime(mainData['datetime'], format='%m/%d/%Y %H:%M')
+        # If you need errors returned as well
+        return labels, reconstruction_error
+        
 
 
-mainData.index = mainData['datetime']
-datetime = mainData[['datetime']]
-mainData = mainData.drop(columns=["datetime"])
+    return labels, reconstruction_error
 
-#labelData = pd.read_csv('abnormallabels.csv')
-labelData['datetime'] = pd.to_datetime(dateTime, format='%Y-%m-%d %H:%M:%S')
-labelData.index = labelData['datetime']
-labelData = labelData.drop(columns = ['datetime'])
+
+########################
+########################
+########################
 
 result_df = pd.DataFrame()
-i = 1
 
 countEvents = []
 disturbance_magnitudes = []
-for estuary in labelData.columns:
+for entry in filtered_data:
+    
+    data_entry = entry["Data"]
+    labels, errors  =  recond_Data(data_entry,168,autoencoder,0.3)
+    estuary = entry.get("Estuary", "Unknown")
+    hurricane = entry.get("Hurricane", "Unknown")
+    year = entry.get("Year", "Unknown")
+    columnslabel= estuary+ "_" + hurricane + "_" + str(year)
+    
+    labels = pd.DataFrame(labels)
+    labels.columns = ['Label']
+    
+    result_df = pd.DataFrame()
+    
     # Apply the function for each label
-    result_df[estuary] = normalize_and_add_count(labelData[[estuary]].copy(), estuary,min_series_length=6, max_gap_between_series=3*240)['hurricaneCount']
-    df = result_df[[estuary]]
+    result_df[columnslabel] = normalize_and_add_count(labels.copy(), 'Label',min_series_length=12, max_gap_between_series=168*3)['hurricaneCount']
+    result_df.index = data_entry.index[:result_df.shape[0]]
+    df = result_df[[columnslabel]]
     # Step 1: Extract unique values from 'Estuary_18' column excluding 0
-    unique_values = df[estuary].unique()
+    unique_values = df[columnslabel].unique()
     unique_values = unique_values[unique_values != 0]
     
     countEvents.append(unique_values.size)
     
-    # Step 2: Create a new dataframe to store the results
+    # Create a new dataframe to store the results
     result_df1 = pd.DataFrame()
 
-    # Step 3: Iterate over unique values and extract data from 'mainData'
+    # Iterate over unique values and extract data from 'mainData'
     # Define an empty results DataFrame
     all_results = pd.DataFrame(index=['pre-cyclone', 'cyclone', 'post-cyclone'])
-    #i = 1
-    
-    estmainData = mainData.iloc[:,(i-1)*4:4*i]
+    estmainData = data_entry.iloc[:,0:4]
     #Esturay Reconstruction Data
-    reconData = reconstruction_errors.iloc[:,i]
+    
+    reconData = pd.DataFrame(errors)
+    reconData.columns = ['error']
+    
+    
     print(estmainData.columns)
-    estmainData.columns = ['Temp', 'Sal', 'DO_mgl', 'Turb']
-    estmainData['datetime'] = datetime['datetime'].values
+    estmainData.columns = ['Temperature', 'Salinity', 'DO', 'Turbidity']
+    estmainData['datetime'] = data_entry.index
     reconData.index = df.index
+    reconData['datetime'] = df.index
+    
 
     
     
-    # Step 3: Iterate over unique values and extract data from 'mainData'
+    #Iterate over unique values and extract data
     for value in unique_values:
-        subset = df.loc[df[estuary] == value]
-        subset_reconData = reconData[df[estuary] == value]
+        subset = df.loc[df[columnslabel] == value]
+        subset_reconData = reconData[df[columnslabel] == value]
     
         if not subset.empty:
-            start_time =  pd.to_datetime(subset.index[0]) - pd.Timedelta(days=10)
-            end_time =  pd.to_datetime(subset.index[-1]) +  pd.Timedelta(days=10)
+            start_time =  pd.to_datetime(subset.index[0]) - pd.Timedelta(days=7)
+            end_time =  pd.to_datetime(subset.index[-1]) +  pd.Timedelta(days=7)
     
             # Extract data from 'mainData' using time windows
-            start_window = start_time - pd.Timedelta(days=30)
-            end_window = end_time + pd.Timedelta(days=30)
-            df['errors'] = reconstruction_errors[estuary].values
-            df['datetime'] = reconstruction_errors['datetime'].values
-         
-
-            sub_reconstructedData = df[(df['datetime'] >= start_time) &(df['datetime'] <= end_time)]
-            plt.plot(sub_reconstructedData.index, sub_reconstructedData['errors'].values)
-            
-            print(f'The value is {value}')
-            print(len(sub_reconstructedData['errors']))
-            global_peak_index, recoveryIndex, observations_after_peak, datu = find_peaks_in_concave_segments(sub_reconstructedData['errors'])
-            sub_reconstructedData['serr'] = datu
-            plt.plot(sub_reconstructedData.index, sub_reconstructedData['errors'].values)
-            plt.plot(sub_reconstructedData.index, sub_reconstructedData['serr'].values)
-            plt.show()
-            
-            
-            import plotly.graph_objs as go
-            from plotly.subplots import make_subplots
-            
-            # Assuming df is your DataFrame and start_time, end_time are defined
-            sub_reconstructedData = df[(df['datetime'] >= start_time) & (df['datetime'] <= end_time)]
-            
-            # Find peaks and recovery indices using your function
-            global_peak_index, recoveryIndex, observations_after_peak, datu = find_peaks_in_concave_segments(sub_reconstructedData['errors'])
-            
-            # Update 'serr' with smoothed data
-            sub_reconstructedData['serr'] = datu
-            
-            # Create subplots for interactive plotting
-            fig = make_subplots()
-            
-            # Add the original error plot
-            fig.add_trace(go.Scatter(x=sub_reconstructedData.index, y=sub_reconstructedData['errors'],
-                                     mode='lines', name='Error', line=dict(color='blue')))
-            
-            # Add the smoothed error plot
-            fig.add_trace(go.Scatter(x=sub_reconstructedData.index, y=sub_reconstructedData['serr'],
-                                     mode='lines', name='Smoothed Error', line=dict(color='orange')))
-            
-            # Set the disturbance phase with red background
-            fig.add_vrect(x0=sub_reconstructedData.index[0], x1=sub_reconstructedData.index[global_peak_index],
-                          annotation_text="Disturbance Phase", annotation_position="top left",
-                          fillcolor="red", opacity=0.5, line_width=0)
-            
-            # Set the recovery phase with green background
-            fig.add_vrect(x0=sub_reconstructedData.index[global_peak_index], x1=sub_reconstructedData.index[recoveryIndex],
-                          annotation_text="Recovery Phase", annotation_position="top left",
-                          fillcolor="green", opacity=0.5, line_width=0)
-            
-            # Update layout with Times New Roman font and plot width
-            fig.update_layout(
-                title='Cyclone Disturbance and Recovery Phases',
-                xaxis_title='Time',
-                yaxis_title='Reconstruction Error',
-                font=dict(family="Times New Roman", size=12, color="black"),
-                width=650  # Width of 6.5 inches (in pixels)
-            )
-            
-            # Show interactive plot
-            fig.show()
-            import plotly.io as pio
-            pio.write_image(fig, 'cyclone_disturbance_recovery.svg')
-            
-            
-            
-            
-            
-            from plotly.subplots import make_subplots
-            import plotly.graph_objs as go
-            import plotly.io as pio
-            import pandas as pd
-            
-            # Assuming sub_reconstructedData, global_peak_index, and recoveryIndex are defined
-            # For demonstration, I'll create a fake datetime
-            tot = df[(df['datetime'] >= start_window) & (df['datetime'] <= end_window)]
-            
-            #sub_reconstructedData.index = pd.date_range(start="2024-01-01", periods=len(sub_reconstructedData), freq='D')
-            
-            fig = make_subplots()
-            
-            # Add the original error plot
-            fig.add_trace(go.Scatter(x=tot.index, y=tot['errors'],
-                                     mode='lines', name='Reconstruction Error', line=dict(color='blue')))
-            
-            #fig.add_trace(go.Scatter(x=sub_reconstructedData.index, y=sub_reconstructedData['errors'],
-             #                        mode='lines', name='Reconstruction Error', line=dict(color='blue')))
-            
-            # Add the smoothed error plot
-            fig.add_trace(go.Scatter(x=sub_reconstructedData.index, y=sub_reconstructedData['serr'],
-                                     mode='lines', name='Smoothed Error', line=dict(color='orange')))
-            
-            # Set the disturbance phase with red background
-            fig.add_vrect(x0=sub_reconstructedData.index[0], x1=sub_reconstructedData.index[global_peak_index],
-                          annotation_text="Disturbance Phase", annotation_position="top left",
-                          fillcolor="red", opacity=0.3, line_width=0)
-            
-            # Set the recovery phase with green background
-            fig.add_vrect(x0=sub_reconstructedData.index[global_peak_index], x1=sub_reconstructedData.index[recoveryIndex],
-                          annotation_text="Recovery Phase", annotation_position="top left",
-                          fillcolor="green", opacity=0.3, line_width=0)
-            
-            # Update layout with Times New Roman font, plot width, and x-axis formatting
-            fig.update_layout(
-                title='Cyclone Disturbance and Recovery Phases',
-                xaxis=dict(
-                    title='Time',
-                    tickmode='auto',
-                    nticks=len(sub_reconstructedData) // 30,
-                    tickformat='%b %d'  # Format like 'Jan 01'
-                ),
-                yaxis_title='Error',
-                legend=dict(y=0.5, font=dict(size=10), bgcolor='rgba(255,255,255,0.5)'),
-                font=dict(family="Times New Roman", size=12, color="black"),
-                width=650,  # Width of 6.5 inches (in pixels)
-                showlegend=True
-            )
-            
-            # Show interactive plot
-            fig.show()
-            
-            # Save the figure to an SVG file
-            pio.write_image(fig, 'cyclone_disturbance_recovery.svg')
-            
-
-            
-            
-            
-            
-            
-            # Calculate disturbance magnitude using the function
-            disturbance_magnitude = calculate_disturbance_magnitude(sub_reconstructedData)
-            
-            if disturbance_magnitude >= 4:
-                
-
-               # Append results to the data structure for making plots
-               disturbance_magnitudes.append({'Estuary': estuary, 'Value': value, 'Magnitude': disturbance_magnitude, 
-                                              'Peak': sub_reconstructedData.index[global_peak_index], 
-                                              'Recovery':sub_reconstructedData.index[recoveryIndex],
-                                              'RecoveryDays': (recoveryIndex- global_peak_index)/24})
-               '''
+            start_window = start_time - pd.Timedelta(days=14)
+            end_window = end_time + pd.Timedelta(days=14)
             
             sub_data = estmainData[(estmainData['datetime'] >= start_window) & (estmainData['datetime'] <= end_window)]
     
-            # Add a new column to indicate the time period
-            #sub_data['cyclone_Status'] = pd.cut(sub_data['datetime'], bins=[start_window, start_time, end_time, end_window],
-            #                                     labels=['pre-cyclone', 'cyclone', 'post-cyclone'], include_lowest=True)
+            
             sub_data = sub_data.copy()
             sub_data.loc[:, 'cyclone_Status'] = pd.cut(sub_data['datetime'], bins=[start_window, start_time, end_time, end_window],
                                            labels=['pre-cyclone', 'cyclone', 'post-cyclone'], include_lowest=True)
 
-            #sub_data.loc[:, 'cyclone_Status'] = pd.cut(sub_data['datetime'], bins=[start_window, start_time, end_time, end_window],
-            #                               labels=['pre-cyclone', 'cyclone', 'post-cyclone'], include_lowest=True)
+            
 
     
             #plots
-            plot_sub_data(sub_data,f'{filename}_{estuary}_{value}')
-                '''
-    #print(i)
-    i += 1
-    
+            plot_data_with_customization(sub_data,"featurePlot_subs", columnslabel+"_"+str(value))
+                
 
-
-import pandas as pd
-import seaborn as sns
-
-
-# Assuming 'disturbance_magnitudes' is a list of dictionaries containing disturbance magnitudes
-# Example: [{'Estuary': 'Estuary1', 'Value': 'Value1', 'Magnitude': 0.123}, ...]
-
-# Convert the list of dictionaries to a DataFrame
-disturbance_df = pd.DataFrame(disturbance_magnitudes)
-
-# Save the DataFrame to an Excel file
-disturbance_df.to_excel('Recoverywithmag.xlsx', index=False)
-#disturbance_df.to_excel('disturbance_magnitudes1.xlsx', index=False)
+DM = pd.DataFrame(disturbance_magnitudes)
